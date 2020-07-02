@@ -4,7 +4,9 @@ import re
 import pickle
 import os
 import string
-#from SPARQLWrapper import SPARQLWrapper, POST, DIGEST
+from SPARQLWrapper import SPARQLWrapper, POST, DIGEST, BASIC, JSON
+import Parameters as parameters
+from yandex.Translater import Translater
 
 '''Sauvegarde les donnees json 
 Arguments: donnees a sauvegarder et le nom du fichier
@@ -15,6 +17,24 @@ def write_json(data, filename):
     with open(filename, 'w') as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
 
+def detect_language(texte):
+    tr = Translater()
+    tr.set_key(parameters.yandex_api_key())
+    tr.set_text(texte)
+    tr.set_hint("fr", "en")
+    return tr.detect_lang()
+
+def get_data(request):
+    conx = parameters.get_login_pwd()
+    sparql = SPARQLWrapper("https://ws49-cl4-jena.tl.teralab-datascience.fr/dmexpo/sparql")
+    sparql.setHTTPAuth(BASIC)
+    sparql.setCredentials(conx[0], conx[1])
+    sparql.setMethod(POST)
+    sparql.setReturnFormat(JSON)
+    sparql.setQuery(request)
+    results = sparql.query()
+    #sprint(results.response.read().decode("utf-8"))
+    return results.response.read().decode("utf-8")
 
 '''Supprime la liste des doublons dans les styles artistiques et des caracteres speciaux 
 Arguments: liste artistiques
@@ -31,8 +51,15 @@ def clean_list(list_artistique):
 
     return clean_art_list
 
+def remove_special_caracters(texte):
+    texte = texte.strip()
+    invalid_caracters = list(set(string.punctuation))
+    invalid_caracters.append("’")
+    clean_texte = texte.translate({ord(c): " " for c in invalid_caracters})
+    clean_texte = re.sub(' +', ' ', clean_texte)
+    return clean_texte+" " #.strip()
 
-file_folder = "/media/basile/New Volume/IFI/Stage/datasets/DataMusee/NER/"
+file_folder = parameters.file_folder()
 
 '''Construit le fichier des styles artistiques 
 Arguments: None
@@ -164,34 +191,76 @@ def process_styles_artistiques_data():
 Arguments: None
 Returns:   None'''
 def process_expositions_data():
-    with open(file_folder + "Expo_comments.json") as json_file:
+    print("Start processing")
+    print("-"*75)
+    requests = """
+    PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+    PREFIX schema: <http://schema.org/>
+
+    select ?lb ?cmt where {
+      graph ?g {
+        ?s rdfs:label ?lb.
+        ?s rdfs:comment ?cmt.
+      }
+    }
+    """
+    expo_lb_cmts = get_data(requests)
+    expo_data_json = json.loads(expo_lb_cmts)
+    open(file_folder+"Process_data/" + "Expo_comments.json", 'w').close() # Suppression du contenu du fichier avt ecriture
+    write_json(expo_data_json, file_folder+"Process_data/" + "Expo_comments.json")
+    print("End get data to server ")
+    print("-"*50)
+    with open(file_folder+"Process_data/" + "Expo_comments.json") as json_file:
         data = json.load(json_file)
         results = (data["results"])["bindings"]
         # print(type(results))
         # print(results)
         cpt = 0
         nb_sent = 0
-        open(file_folder + "tmp_expo.txt", 'w').close()  # Suppression du contenu du fichier avt ecriture
+        open(file_folder+"Process_data/" + "tmp_expo.txt", 'w').close()  # Suppression du contenu du fichier avt ecriture
         for binding in results:
             cpt += 1
             cmt = binding["cmt"]
             if cmt["xml:lang"] == "fr":
                 cmt_txt = cmt["value"]  # .replace('\n', '')
-                with open(file_folder + "tmp_expo.txt", "a") as text_file:
+                with open(file_folder+"Process_data/" + "tmp_expo.txt", "a") as text_file:
                     text_file.write(cmt_txt)
 
-        open(file_folder + "expo.txt", 'w').close()  # Suppression du contenu du fichier avt ecriture
-        with open(file_folder + "tmp_expo.txt", 'r') as file:
+        print("Start process tmp_expo => expo")
+        print("-" * 50)
+        open(file_folder+"Process_data/" + "expo.txt", 'w').close()  # Suppression du contenu du fichier avt ecriture
+        with open(file_folder+"Process_data/" + "tmp_expo.txt", 'r') as file:
             document = file.read().replace('\n', '')
             sentences_list = nltk.tokenize.sent_tokenize(document)
+            tot_sent = len(sentences_list)
+            i = 0
             for s in sentences_list:
+                i += 1
                 s = s.strip()
-                if s:
-                    nb_sent += 1
-                    with open(file_folder + "expo.txt", "a") as text_file:
+                if s and detect_language(s) == "fr":
+                    #nb_sent += 1
+                    with open(file_folder+"Process_data/" + "expo.txt", "a") as text_file:
                         text_file.write(s + "\n")
+                print(str(i / tot_sent * 100)+ " percent complete         \r")
         #print(cpt)
         #print(nb_sent)
+    print("End processing")
+    print("-"*75)
+
+
+def select_french_texte():
+    with open(file_folder + "Process_data/" + "expo.txt", 'r') as file:
+        document = file.readlines()
+    tot_sent = len(document)
+    i = 0
+    open(file_folder + "Process_data/" + "expo_fr.txt", 'w').close()  # Suppression du contenu du fichier avt ecriture
+    for s in document:
+        s = s.replace('\n', '')
+        i += 1
+        if detect_language(s) == "fr":
+            with open(file_folder + "Process_data/" + "expo_fr.txt", "a") as text_file:
+                text_file.write(s + "\n")
+        print(str(i / tot_sent * 100) + " percent complete         \r")
 
 
 '''Verifie si deux intervalles overlaps 
@@ -239,18 +308,20 @@ def clean_overlaps_entities(list_entities):
 Arguments: None
 Returns:   Train Data'''
 def process_train_data():
-    with open(file_folder + "styles_artistiques.json") as json_file:
+    with open(file_folder + "Process_data/" + "styles_artistiques.json") as json_file:
         data = json.load(json_file)
         # lstArtistique = []
-    with open(file_folder + "expo.txt", 'r') as file:
+    with open(file_folder + "Process_data/" + "expo.txt", 'r') as file:
         document = file.readlines()
 
     train_data = []
     invalid_caracters = list(set(string.punctuation))
     invalid_caracters.insert(0, " ")
+    invalid_caracters.append("’")
 
     for s in document:
         s = s.replace('\n', '')
+        s = remove_special_caracters(s)
         # chercher les techniques dans s
         lst_entities = []
         for p in data:
@@ -261,11 +332,17 @@ def process_train_data():
                 # print(p+" => "+w)
                 w = w.replace("?", "").replace(")", "").replace("(", "").replace(".", "")
                 w = w.strip()
+                w = remove_special_caracters(w)
+                w = w.strip()
                 if w:
                     for match in re.finditer(w, s):
                         # print("match found from {} to {}".format(match.start(), match.end()))
                         if match.start() == 0:
                             if s[match.end()] in invalid_caracters:
+                                print(w + " => " + s)
+                                lst_entities.append((match.start(), match.end(), p))
+                        elif match.end() == len(s):
+                            if s[match.start() - 1] in invalid_caracters:
                                 print(w + " => " + s)
                                 lst_entities.append((match.start(), match.end(), p))
                         elif s[match.start() - 1] in invalid_caracters and s[match.end()] in invalid_caracters:
@@ -276,9 +353,9 @@ def process_train_data():
         print(lst_entities)
         train_data.append((s, {"entities": lst_entities}))
 
-    write_json(train_data, file_folder + "train_data.json")
+    write_json(train_data, file_folder + "Process_data/" + "train_data.json")
 
-    with open(file_folder + "train_data.pickle", 'wb') as handle:
+    with open(file_folder + "Process_data/" + "train_data.pickle", 'wb') as handle:
         pickle.dump(train_data, handle)
     # with open(file_folder + "train_data.pickle", 'rb') as handle:
     #    train_data = pickle.load(handle)
@@ -287,7 +364,23 @@ def process_train_data():
 
 
 # process_styles_artistiques_data()
-#process_train_data()
+process_train_data()
 
-#sparql = SPARQLWrapper("https://ws49-cl4-jena.tl.teralab-datascience.fr/dmexpo/query")
+#process_expositions_data()
+#select_french_texte()
+
+'''with open("expo_lb_cmts.pickle", 'rb') as handle:
+    expo_data = pickle.load(handle)
+    #results = (expo_data["results"])["bindings"]
+    #print(expo_data)
+    print(type(expo_data))
+    print(len(expo_data))
+    expo_data_json = json.loads(expo_data)
+    print(expo_data_json)
+    print(type(expo_data_json))
+    print(len(expo_data_json))
+    print(expo_data_json.keys())
+
+'''
+
 
